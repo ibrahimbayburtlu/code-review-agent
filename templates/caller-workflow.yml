@@ -1,3 +1,6 @@
+# Bu dosyayı projenin .github/workflows/ai-review.yml yoluna kopyala,
+# sonra repo'ya ANTHROPIC_API_KEY secret'ını ekle:  gh secret set ANTHROPIC_API_KEY
+
 name: AI Code Review
 
 on:
@@ -14,9 +17,9 @@ concurrency:
 
 jobs:
   review:
-    uses: ./.github/workflows/reusable-review.yml
+    uses: ibrahimbayburtlu/code-review-agent/.github/workflows/reusable-review.yml@main
     with:
       categories: "security,bug,performance,architecture,test"
-      fail_on: ""
+      fail_on: ""  # örn: "security:high"
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

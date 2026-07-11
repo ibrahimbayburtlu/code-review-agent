@@ -48,7 +48,38 @@ Her bulgu tam olarak bir kategoriye atanır; özet yorum kategori bazında grupl
 | 🏗️ `architecture` | Yanlış katman, sıkı bağlılık, repo desenleriyle uyumsuzluk |
 | 🧪 `test` | Değişen davranış için eksik/yanlış test |
 
-## Kurulum
+## Başka bir projede kullanma (önerilen yol)
+
+Agent'ı her projeye kopyalamana gerek yok — bu repo **reusable workflow** olarak
+çağrılır. Herhangi bir projende, proje kökünden iki komut:
+
+```bash
+mkdir -p .github/workflows
+curl -fsSL https://raw.githubusercontent.com/ibrahimbayburtlu/code-review-agent/main/templates/caller-workflow.yml \
+  -o .github/workflows/ai-review.yml
+
+gh secret set ANTHROPIC_API_KEY   # anahtarı gizli olarak yapıştır
+```
+
+Commit'le, PR aç — bitti. Agent kodu her çalışmada bu repo'nun `main`'inden
+çekilir; agent'ı burada geliştirdikçe bütün projelerin otomatik güncel kalır.
+
+Çağıran dosyada kategori ve fail gate proje bazında ayarlanabilir:
+
+```yaml
+jobs:
+  review:
+    uses: ibrahimbayburtlu/code-review-agent/.github/workflows/reusable-review.yml@main
+    with:
+      categories: "security,bug"     # bu projede sadece güvenlik + bug
+      fail_on: "security:high"       # kritik güvenlik bulgusunda check fail
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+> Sürüm sabitlemek istersen `@main` yerine bir tag veya commit SHA kullan.
+
+## Kurulum (bu repo'nun kendisi için)
 
 1. [console.anthropic.com](https://console.anthropic.com) → API key oluştur
    (öneri: ayrı bir workspace + harcama limiti ile).

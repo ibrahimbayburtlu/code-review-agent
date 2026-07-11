@@ -35,4 +35,9 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Çalışacak review türleri (security, bug, performance, architecture, test)
+          REVIEW_CATEGORIES: "security,bug,performance,architecture,test"
+          # PR check'ini kırmızıya düşürecek bulgular. Örn: "security:high" veya
+          # "security:medium,bug:high" veya "any:high". Boş = hiç fail etme.
+          FAIL_ON: ""
         run: python agent/review_agent.py

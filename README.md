@@ -66,13 +66,42 @@ export HEAD_SHA=$(git rev-parse HEAD)
 python agent/review_agent.py
 ```
 
+## Review kategorileri
+
+Her bulgu bir kategoriye atanır; özet yorum kategori bazında gruplanır:
+
+| Kategori | Kapsam |
+|---|---|
+| 🛡️ `security` | Injection, secret sızıntısı, eksik yetki kontrolü, güvensiz kripto |
+| 🐛 `bug` | Mantık hataları, sınır durumları, yarış koşulları, kaynak sızıntıları |
+| ⚡ `performance` | N+1 sorgular, döngü içi I/O, verimsiz algoritma seçimi |
+| 🏗️ `architecture` | Yanlış katman, sıkı bağlılık, repo desenleriyle uyumsuzluk |
+| 🧪 `test` | Değişen davranış için eksik/yanlış test |
+
+Workflow'daki iki ortam değişkeniyle kontrol edilir:
+
+```yaml
+# Hangi kategoriler çalışsın (alt küme seçilebilir):
+REVIEW_CATEGORIES: "security,bug"
+
+# Hangi bulgular PR check'ini kırmızıya düşürsün (fail gate):
+FAIL_ON: "security:high"          # yüksek önemli güvenlik bulgusu varsa fail
+# FAIL_ON: "security:medium,bug:high"  # birden çok kural
+# FAIL_ON: "any:high"                  # kategori fark etmeksizin tüm yüksek bulgular
+# FAIL_ON: ""                          # hiç fail etme (varsayılan)
+```
+
+Yeni bir kategori eklemek için `agent/review_agent.py` içindeki `CATEGORIES`
+sözlüğüne emoji + başlık + yönlendirme metniyle bir kayıt eklemek yeterli —
+şema, sistem prompt'u ve raporlama otomatik uyum sağlar.
+
 ## Özelleştirme
 
-- **Review odağı:** `SYSTEM_PROMPT`'u düzenle (örn. sadece güvenlik odaklı review,
-  belirli klasörleri yok sayma).
+- **Review odağı:** kategori `guidance` metinlerini veya `SYSTEM_PROMPT_TEMPLATE`'i
+  düzenle (örn. belirli klasörleri yok sayma).
 - **Model:** `MODEL` sabiti (varsayılan `claude-opus-4-8`; daha ucuz/hızlı review
   için `claude-sonnet-5`).
-- **Yeni tool eklemek:** `TOOLS` listesine şemayı ekle, `execute_tool()` içine
+- **Yeni tool eklemek:** `build_tools()` içine şemayı ekle, `execute_tool()` içine
   implementasyonunu yaz — örn. testleri çalıştıran bir `run_tests` tool'u.
 - **Limitler:** `MAX_ITERATIONS` (agent tur sayısı), `MAX_INLINE_COMMENTS`,
   `MAX_DIFF_CHARS`, `MAX_TOOL_OUTPUT_CHARS`.

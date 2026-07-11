@@ -1,57 +1,83 @@
-# AI Code Review Agent (sıfırdan)
+# 🤖 AI Code Review Agent
 
-GitHub'a bir PR açıldığında diff'i inceleyip bulguları PR'a **inline yorum** ve
-**özet yorum** olarak bırakan, hazır harness kullanmadan sıfırdan yazılmış bir
-code review agent'ı. Agent döngüsü, tool tanımları ve tool implementasyonları
-tamamen [agent/review_agent.py](agent/review_agent.py) içindedir; Claude yalnızca
-`anthropic` SDK üzerinden model olarak çağrılır.
+[![AI Code Review](https://github.com/ibrahimbayburtlu/code-review-agent/actions/workflows/claude-review.yml/badge.svg)](https://github.com/ibrahimbayburtlu/code-review-agent/actions/workflows/claude-review.yml)
 
-## Mimari
+PR açıldığında diff'i inceleyip bulguları **inline yorum** ve **kategorili özet**
+olarak PR'a bırakan, sıfırdan yazılmış bir code review agent'ı.
+
+Hazır bir agent framework'ü kullanılmaz: agent döngüsü, tool tanımları ve tool
+implementasyonları tamamen [`agent/review_agent.py`](agent/review_agent.py)
+içindedir. Claude yalnızca `anthropic` SDK üzerinden model olarak çağrılır.
+
+## Nasıl çalışır?
 
 ```
-PR açılır/güncellenir
-   └─▶ GitHub Actions workflow (.github/workflows/claude-review.yml)
+PR açılır / güncellenir
+   └─▶ GitHub Actions (.github/workflows/claude-review.yml)
         └─▶ agent/review_agent.py
              ├─ git diff base...head alınır
              ├─ AGENT DÖNGÜSÜ (elle yazılmış):
              │    ┌─▶ client.messages.create(tools=[...])
-             │    │     ├─ stop_reason == "tool_use" ise:
-             │    │     │    list_files / read_file / grep → burada çalıştırılır,
-             │    │     │    sonuç tool_result olarak modele geri gönderilir ──┐
-             │    │     └─ submit_review çağrıldıysa → döngü biter             │
-             │    └───────────────────────────────────────────────────────────┘
-             ├─ Her bulgu ilgili satıra inline yorum olarak eklenir (gh api)
-             └─ PR'a genel özet yorumu bırakılır (gh pr comment)
+             │    │     ├─ tool_use → list_files / read_file / grep
+             │    │     │   runner'da çalıştırılır, sonuç modele geri gider ──┐
+             │    │     └─ submit_review çağrıldı → döngü biter               │
+             │    └──────────────────────────────────────────────────────────┘
+             ├─ Her bulgu ilgili satıra inline yorum (gh api)
+             ├─ Kategorilere gruplu özet yorum (gh pr comment)
+             └─ FAIL_ON kuralı eşleşirse PR check'i fail olur
 ```
 
-Agent'a verilen tool'lar:
+Agent'ın tool'ları:
 
-| Tool | Ne yapar | Nerede çalışır |
-|---|---|---|
-| `list_files` | `git ls-files` ile dosyaları listeler | Runner'da (bizim kodumuz) |
-| `read_file` | Dosyayı satır numaralarıyla okur (repo kökü dışına çıkamaz) | Runner'da |
-| `grep` | `git grep -n -E` ile regex araması | Runner'da |
-| `submit_review` | Nihai raporu yapılandırılmış JSON olarak teslim eder (`strict: true` şema) | Döngüyü sonlandırır |
+| Tool | Ne yapar |
+|---|---|
+| `list_files` | `git ls-files` ile dosyaları listeler |
+| `read_file` | Dosyayı satır numaralarıyla okur (repo kökü dışına çıkamaz) |
+| `grep` | `git grep -n -E` ile regex araması |
+| `submit_review` | Nihai raporu `strict: true` şemalı JSON olarak teslim eder, döngüyü bitirir |
 
-`submit_review`'un `strict: true` olması sayesinde bulgular şemaya birebir uygun
-gelir — çıktıdan JSON kazımaya gerek kalmaz.
+## Review kategorileri
+
+Her bulgu tam olarak bir kategoriye atanır; özet yorum kategori bazında gruplanır:
+
+| Kategori | Kapsam |
+|---|---|
+| 🛡️ `security` | Injection, secret sızıntısı, eksik yetki kontrolü, güvensiz kripto |
+| 🐛 `bug` | Mantık hataları, sınır durumları, yarış koşulları, kaynak sızıntıları |
+| ⚡ `performance` | N+1 sorgular, döngü içi I/O, verimsiz algoritma seçimi |
+| 🏗️ `architecture` | Yanlış katman, sıkı bağlılık, repo desenleriyle uyumsuzluk |
+| 🧪 `test` | Değişen davranış için eksik/yanlış test |
 
 ## Kurulum
 
-1. **API anahtarı al:** [console.anthropic.com](https://console.anthropic.com) → API Keys.
+1. [console.anthropic.com](https://console.anthropic.com) → API key oluştur
+   (öneri: ayrı bir workspace + harcama limiti ile).
+2. Repo'da **Settings → Secrets and variables → Actions** altına
+   `ANTHROPIC_API_KEY` secret'ını ekle:
+   ```bash
+   gh secret set ANTHROPIC_API_KEY
+   ```
+3. PR aç — review 1-2 dakika içinde düşer.
 
-2. **Secret ekle:** GitHub repo'nda **Settings → Secrets and variables → Actions →
-   New repository secret** ile `ANTHROPIC_API_KEY` adında ekle.
-   (`GITHUB_TOKEN`'ı Actions otomatik sağlar, ekstra bir şey gerekmez.)
+## Yapılandırma
 
-3. **Bu dosyaları repo'na kopyala** (veya bu klasörü repo yap):
-   - `.github/workflows/claude-review.yml`
-   - `agent/review_agent.py`
-   - `requirements.txt`
+Workflow'daki (`.github/workflows/claude-review.yml`) ortam değişkenleri:
 
-4. **PR aç.** Workflow otomatik çalışır ve birkaç dakika içinde review yorumları düşer.
+```yaml
+# Hangi kategoriler çalışsın (alt küme seçilebilir):
+REVIEW_CATEGORIES: "security,bug,performance,architecture,test"
 
-## Yerelde test etme
+# Hangi bulgular PR check'ini kırmızıya düşürsün (fail gate):
+FAIL_ON: ""                           # boş = hiç fail etme (varsayılan)
+# FAIL_ON: "security:high"            # yüksek önemli güvenlik bulgusunda fail
+# FAIL_ON: "security:medium,bug:high" # birden çok kural
+# FAIL_ON: "any:high"                 # kategori fark etmeksizin tüm yüksek bulgular
+```
+
+`FAIL_ON`'u branch protection ile birleştirirsen "kritik bulgusu olan PR merge
+edilemez" kuralına dönüşür.
+
+## Yerelde çalıştırma
 
 ```bash
 pip install -r requirements.txt
@@ -66,53 +92,23 @@ export HEAD_SHA=$(git rev-parse HEAD)
 python agent/review_agent.py
 ```
 
-## Review kategorileri
-
-Her bulgu bir kategoriye atanır; özet yorum kategori bazında gruplanır:
-
-| Kategori | Kapsam |
-|---|---|
-| 🛡️ `security` | Injection, secret sızıntısı, eksik yetki kontrolü, güvensiz kripto |
-| 🐛 `bug` | Mantık hataları, sınır durumları, yarış koşulları, kaynak sızıntıları |
-| ⚡ `performance` | N+1 sorgular, döngü içi I/O, verimsiz algoritma seçimi |
-| 🏗️ `architecture` | Yanlış katman, sıkı bağlılık, repo desenleriyle uyumsuzluk |
-| 🧪 `test` | Değişen davranış için eksik/yanlış test |
-
-Workflow'daki iki ortam değişkeniyle kontrol edilir:
-
-```yaml
-# Hangi kategoriler çalışsın (alt küme seçilebilir):
-REVIEW_CATEGORIES: "security,bug"
-
-# Hangi bulgular PR check'ini kırmızıya düşürsün (fail gate):
-FAIL_ON: "security:high"          # yüksek önemli güvenlik bulgusu varsa fail
-# FAIL_ON: "security:medium,bug:high"  # birden çok kural
-# FAIL_ON: "any:high"                  # kategori fark etmeksizin tüm yüksek bulgular
-# FAIL_ON: ""                          # hiç fail etme (varsayılan)
-```
-
-Yeni bir kategori eklemek için `agent/review_agent.py` içindeki `CATEGORIES`
-sözlüğüne emoji + başlık + yönlendirme metniyle bir kayıt eklemek yeterli —
-şema, sistem prompt'u ve raporlama otomatik uyum sağlar.
-
 ## Özelleştirme
 
-- **Review odağı:** kategori `guidance` metinlerini veya `SYSTEM_PROMPT_TEMPLATE`'i
-  düzenle (örn. belirli klasörleri yok sayma).
-- **Model:** `MODEL` sabiti (varsayılan `claude-opus-4-8`; daha ucuz/hızlı review
-  için `claude-sonnet-5`).
-- **Yeni tool eklemek:** `build_tools()` içine şemayı ekle, `execute_tool()` içine
-  implementasyonunu yaz — örn. testleri çalıştıran bir `run_tests` tool'u.
-- **Limitler:** `MAX_ITERATIONS` (agent tur sayısı), `MAX_INLINE_COMMENTS`,
-  `MAX_DIFF_CHARS`, `MAX_TOOL_OUTPUT_CHARS`.
+- **Yeni kategori:** `CATEGORIES` sözlüğüne emoji + başlık + yönlendirme metni
+  ekle — şema, sistem prompt'u ve raporlama otomatik uyum sağlar.
+- **Yeni tool:** `build_tools()` içine şemayı, `execute_tool()` içine
+  implementasyonu ekle (örn. testleri çalıştıran `run_tests`).
+- **Model:** `MODEL` sabiti (varsayılan `claude-opus-4-8`; daha ucuz/hızlı
+  review için `claude-sonnet-5`).
+- **Limitler:** `MAX_ITERATIONS`, `MAX_INLINE_COMMENTS`, `MAX_DIFF_CHARS`,
+  `MAX_TOOL_OUTPUT_CHARS`.
 
-## Notlar
+## Güvenlik notları
 
-- Agent'ın tool'ları yalnızca **okuma** yapar; `read_file` ve `grep`, repo kökü
-  dışına erişimi engeller (`safe_path`).
-- Bir bulgunun satırı diff içinde değilse GitHub inline yorumu reddeder (422);
-  bu bulgular otomatik olarak özet yorumuna taşınır.
-- Model `submit_review` çağırmadan biterse workflow başarısız olur ve PR'a bir
-  uyarı yorumu düşer.
-- Fork'lardan gelen PR'larda secret'lar workflow'a verilmez; agent yalnızca
-  aynı repo içindeki branch'lerden açılan PR'larda çalışır.
+- Agent'ın tool'ları yalnızca **okuma** yapar; `read_file` ve `grep` repo kökü
+  dışına erişemez (`safe_path`).
+- Fork'lardan gelen PR'larda GitHub secret'ları vermez; agent yalnızca aynı
+  repo içindeki branch PR'larında çalışır.
+- Satırı diff dışında kalan bulgular (GitHub 422) otomatik olarak özet yoruma
+  taşınır; model `submit_review` çağırmadan biterse workflow fail olur ve PR'a
+  uyarı düşer.

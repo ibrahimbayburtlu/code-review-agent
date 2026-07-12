@@ -1,5 +1,8 @@
 # Bu dosyayı projenin .github/workflows/ai-review.yml yoluna kopyala,
 # sonra repo'ya ANTHROPIC_API_KEY secret'ını ekle:  gh secret set ANTHROPIC_API_KEY
+#
+# İnteraktif "/ai <soru>" özelliği için ayrıca templates/discuss-workflow.yml'i de
+# .github/workflows/ai-discuss.yml olarak kopyalayabilirsin.
 
 name: AI Code Review
 
@@ -20,6 +23,9 @@ jobs:
     uses: ibrahimbayburtlu/code-review-agent/.github/workflows/reusable-review.yml@main
     with:
       categories: "security,bug,performance,architecture,test"
-      fail_on: ""  # örn: "security:high"
+      persona: "default"              # strict | mentor | clean-code | paranoid
+      fail_on: ""                     # örn: "security:high" veya "any:critical"
+      max_risk_score: ""              # örn: "70" (risk > 70 ise check fail)
+      min_confidence: "0"             # örn: "60" (güveni <60 olan bulgular gizlenir)
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

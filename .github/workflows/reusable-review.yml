@@ -17,10 +17,22 @@ on:
         description: "Virgülle ayrılmış review kategorileri"
         type: string
         default: "security,bug,performance,architecture,test"
+      persona:
+        description: "Reviewer üslubu: default | strict | mentor | clean-code | paranoid"
+        type: string
+        default: "default"
       fail_on:
         description: "Fail gate kuralları, örn. 'security:high' (boş = fail etme)"
         type: string
         default: ""
+      max_risk_score:
+        description: "Risk skoru bunu aşarsa check fail (boş = kapalı)"
+        type: string
+        default: ""
+      min_confidence:
+        description: "Bu güven skorunun altındaki bulgular gizlenir (0-100)"
+        type: string
+        default: "0"
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -59,5 +71,8 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REVIEW_CATEGORIES: ${{ inputs.categories }}
+          REVIEW_PERSONA: ${{ inputs.persona }}
           FAIL_ON: ${{ inputs.fail_on }}
+          MAX_RISK_SCORE: ${{ inputs.max_risk_score }}
+          MIN_CONFIDENCE: ${{ inputs.min_confidence }}
         run: python .review-agent/agent/review_agent.py

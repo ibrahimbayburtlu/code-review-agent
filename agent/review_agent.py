@@ -6,9 +6,14 @@ elle kurulmuştur. Claude'a repo'yu incelemesi için üç okuma tool'u verilir
 (list_files, read_file, grep); incelemeyi bitirince submit_review tool'unu
 çağırarak bulgularını yapılandırılmış olarak teslim eder.
 
-Her bulgu bir review kategorisine aittir (güvenlik, bug, performans, mimari, test).
-Hangi kategorilerin inceleneceği REVIEW_CATEGORIES ile, hangi bulguların PR
-check'ini kırmızıya düşüreceği FAIL_ON ile kontrol edilir.
+Özellikler:
+  - Kategori bazlı bulgular (security, bug, performance, architecture, test)
+  - 5 önem seviyesi (critical, high, medium, low, info)
+  - Bulgu başına confidence skoru + gerekçe
+  - GitHub suggestion formatında tek tıkla uygulanabilir düzeltmeler
+  - Verdict (approve / comment / request_changes) + 0-100 release risk skoru
+  - Reviewer kişilikleri (strict, mentor, clean-code, paranoid)
+  - FAIL_ON ve MAX_RISK_SCORE ile PR check gate'leri
 
 GitHub Actions içinde çalışır. Beklenen ortam değişkenleri:
   ANTHROPIC_API_KEY  - Claude API anahtarı
@@ -19,11 +24,14 @@ GitHub Actions içinde çalışır. Beklenen ortam değişkenleri:
 Opsiyonel:
   REVIEW_CATEGORIES  - virgülle ayrılmış kategori listesi
                        (varsayılan: security,bug,performance,architecture,test)
+  REVIEW_PERSONA     - reviewer üslubu: default | strict | mentor | clean-code | paranoid
+  MIN_CONFIDENCE     - bu değerin altındaki güven skorlu bulgular gizlenir (0-100, varsayılan 0)
   FAIL_ON            - "kategori:min_önem" kuralları, virgülle ayrılır.
-                       Örn: "security:high" veya "security:medium,bug:high" veya
-                       "any:high". Eşleşen bulgu varsa script 1 ile çıkar ve
-                       PR check'i başarısız olur. Boşsa hiç fail etmez.
+                       Örn: "security:high" veya "any:critical". Boşsa fail etmez.
+  MAX_RISK_SCORE     - risk skoru bu değeri aşarsa check fail olur (boş = kapalı)
 """
+
+from __future__ import annotations
 
 import os
 import subprocess
@@ -40,8 +48,21 @@ MAX_INLINE_COMMENTS = 20
 
 REPO_ROOT = Path.cwd().resolve()
 
-SEVERITY_BADGE = {"high": "🔴 Yüksek", "medium": "🟡 Orta", "low": "🔵 Düşük"}
-SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2}
+SEVERITY_BADGE = {
+    "critical": "⛔ Kritik",
+    "high": "🔴 Yüksek",
+    "medium": "🟡 Orta",
+    "low": "🔵 Düşük",
+    "info": "⚪ Bilgi",
+}
+SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+SEVERITIES = list(SEVERITY_RANK)
+
+VERDICT_META = {
+    "approve": "✅ Approve",
+    "comment": "💬 Comment",
+    "request_changes": "❌ Request Changes",
+}
 
 # ---------------------------------------------------------------------------
 # Review kategorileri — yeni bir tür eklemek için buraya bir kayıt eklemek yeterli
@@ -95,6 +116,30 @@ CATEGORIES: dict[str, dict[str, str]] = {
 
 DEFAULT_CATEGORIES = "security,bug,performance,architecture,test"
 
+# ---------------------------------------------------------------------------
+# Reviewer kişilikleri — yalnızca prompt üslubunu değiştirir
+# ---------------------------------------------------------------------------
+
+PERSONAS: dict[str, str] = {
+    "default": "",
+    "strict": (
+        "Üslup: Katı kurumsal reviewer. Standartlardan taviz verme, sınır durumlarını "
+        "ve API sözleşmelerini sorgula, 'idare eder' kabul etme. Profesyonel ve net ol."
+    ),
+    "mentor": (
+        "Üslup: Dost canlısı mentor. Bulguları öğretici bir dille anlat, nedenini "
+        "açıkla, doğru yapılmış kısımları da takdir et. Küçümseyici olma."
+    ),
+    "clean-code": (
+        "Üslup: Clean Code odaklı reviewer. İsimlendirme, fonksiyon boyutu, tek "
+        "sorumluluk ilkesi ve okunabilirlik üzerine özellikle eğil."
+    ),
+    "paranoid": (
+        "Üslup: Güvenlik paranoyağı. Tüm girdilere düşman gözüyle bak, en kötü "
+        "senaryoyu varsay, güvenlik ve veri sızıntısı bulgularında agresif davran."
+    ),
+}
+
 SYSTEM_PROMPT_TEMPLATE = """\
 Sen kıdemli bir yazılım mühendisisin ve pull request incelemesi yapıyorsun.
 Sana bir PR diff'i verilecek. Diff'te bağlamı eksik görünen yerlerde list_files,
@@ -104,8 +149,30 @@ read_file ve grep tool'larıyla repo'nun tamamına bakarak değerlendir.
 
 {category_sections}
 
-Stil ve format gibi önemsiz konuları raporlama. Emin olmadığın bulguları
-düşük önem derecesiyle işaretle.
+Önem seviyeleri: critical (veri kaybı/uzaktan kod çalıştırma/ciddi güvenlik ihlali),
+high (üretimde soruna yol açar), medium (düzeltilmeli ama acil değil),
+low (iyileştirme), info (bilgilendirme). Stil ve format gibi önemsiz konuları
+raporlama.
+
+Her bulgu için ayrıca:
+- confidence: 0-100 arası güven yüzdesi (bu sorunun gerçek olduğuna ne kadar eminsin).
+- reasoning: bu güven skorunun tek cümlelik gerekçesi.
+- fix_code: İşaret ettiğin satırın YERİNE geçecek düzeltilmiş kod. Yalnızca
+  düzeltmeden eminsen ve düzeltme o tek satırla sınırlıysa doldur; aksi halde boş
+  string bırak. Markdown/fence kullanma, sadece kod yaz. Bu içerik GitHub
+  suggestion olarak tek tıkla uygulanacak.
+- references: ilgili standart/doküman referansları (örn. "OWASP A03:2021",
+  "CWE-89", resmi doküman URL'si). Yoksa boş liste.
+
+Genel değerlendirme için:
+- verdict: "approve" (bloklayıcı sorun yok), "comment" (düzeltilmesi iyi olur ama
+  bloklayıcı değil), "request_changes" (critical/high sorunlar merge'den önce
+  düzeltilmeli).
+- risk_score: 0-100 arası, bu PR'ı release etmenin riski. Güvenlik, veri/şema
+  değişikliği, kimlik doğrulama, iş mantığı değişikliği, test eksikliği, API
+  değişikliği ve değişiklik boyutunu tart. risk_reason ile 1-2 cümlede açıkla.
+
+{persona_section}
 
 İncelemeyi bitirdiğinde bulgularını MUTLAKA submit_review tool'unu çağırarak
 teslim et. Bulgu yoksa submit_review'u boş findings listesiyle çağır.
@@ -123,86 +190,110 @@ def active_categories() -> list[str]:
     return selected
 
 
-def build_system_prompt(categories: list[str]) -> str:
+def active_persona() -> str:
+    persona = os.environ.get("REVIEW_PERSONA", "default").strip() or "default"
+    if persona not in PERSONAS:
+        sys.exit(f"Bilinmeyen persona: {persona}. Geçerli: {list(PERSONAS)}")
+    return persona
+
+
+def build_system_prompt(categories: list[str], persona: str) -> str:
     sections = "\n".join(
         f"- **{c}** ({CATEGORIES[c]['emoji']} {CATEGORIES[c]['title']}): {CATEGORIES[c]['guidance']}"
         for c in categories
     )
-    return SYSTEM_PROMPT_TEMPLATE.format(category_sections=sections)
+    return SYSTEM_PROMPT_TEMPLATE.format(
+        category_sections=sections,
+        persona_section=PERSONAS[persona],
+    )
+
+
+# Salt-okunur repo tool'ları — discuss_agent.py de bunları kullanır
+READ_TOOLS: list[dict] = [
+    {
+        "name": "list_files",
+        "description": "Repo'daki (git'e ekli) dosyaları listeler. İsteğe bağlı glob deseniyle filtrelenir, örn. 'src/**/*.py'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "glob": {"type": "string", "description": "Opsiyonel glob deseni. Boş bırakılırsa tüm dosyalar."},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "read_file",
+        "description": "Repo'dan bir dosyanın içeriğini satır numaralarıyla döner.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Repo köküne göre dosya yolu."},
+                "start_line": {"type": "integer", "description": "Opsiyonel başlangıç satırı (1 tabanlı)."},
+                "end_line": {"type": "integer", "description": "Opsiyonel bitiş satırı (dahil)."},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "grep",
+        "description": "Repo içinde regex araması yapar (git grep). Eşleşen satırları dosya:satır formatında döner.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Aranacak ERE regex deseni."},
+                "path": {"type": "string", "description": "Opsiyonel: aramayı sınırlayacak dizin veya glob."},
+            },
+            "required": ["pattern"],
+        },
+    },
+]
 
 
 def build_tools(categories: list[str]) -> list[dict]:
-    return [
-        {
-            "name": "list_files",
-            "description": "Repo'daki (git'e ekli) dosyaları listeler. İsteğe bağlı glob deseniyle filtrelenir, örn. 'src/**/*.py'.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "glob": {"type": "string", "description": "Opsiyonel glob deseni. Boş bırakılırsa tüm dosyalar."},
+    submit_review = {
+        "name": "submit_review",
+        "description": "İnceleme bittiğinde nihai raporu teslim eder. Bu tool'u çağırmak incelemeyi sonlandırır.",
+        "strict": True,
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "PR'ın ne yaptığının ve genel değerlendirmenin 2-3 cümlelik özeti.",
                 },
-                "required": [],
-            },
-        },
-        {
-            "name": "read_file",
-            "description": "Repo'dan bir dosyanın içeriğini satır numaralarıyla döner.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Repo köküne göre dosya yolu."},
-                    "start_line": {"type": "integer", "description": "Opsiyonel başlangıç satırı (1 tabanlı)."},
-                    "end_line": {"type": "integer", "description": "Opsiyonel bitiş satırı (dahil)."},
-                },
-                "required": ["path"],
-            },
-        },
-        {
-            "name": "grep",
-            "description": "Repo içinde regex araması yapar (git grep). Eşleşen satırları dosya:satır formatında döner.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "pattern": {"type": "string", "description": "Aranacak ERE regex deseni."},
-                    "path": {"type": "string", "description": "Opsiyonel: aramayı sınırlayacak dizin veya glob."},
-                },
-                "required": ["pattern"],
-            },
-        },
-        {
-            "name": "submit_review",
-            "description": "İnceleme bittiğinde nihai raporu teslim eder. Bu tool'u çağırmak incelemeyi sonlandırır.",
-            "strict": True,
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "summary": {
-                        "type": "string",
-                        "description": "PR'ın ne yaptığının ve genel değerlendirmenin 2-3 cümlelik özeti.",
-                    },
-                    "findings": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "category": {"type": "string", "enum": categories},
-                                "file": {"type": "string"},
-                                "line": {"type": "integer"},
-                                "severity": {"type": "string", "enum": ["high", "medium", "low"]},
-                                "title": {"type": "string"},
-                                "detail": {"type": "string"},
-                                "suggestion": {"type": "string"},
-                            },
-                            "required": ["category", "file", "line", "severity", "title", "detail", "suggestion"],
-                            "additionalProperties": False,
+                "verdict": {"type": "string", "enum": ["approve", "comment", "request_changes"]},
+                "risk_score": {"type": "integer", "description": "0-100 arası release risk skoru."},
+                "risk_reason": {"type": "string", "description": "Risk skorunun 1-2 cümlelik gerekçesi."},
+                "findings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "category": {"type": "string", "enum": categories},
+                            "file": {"type": "string"},
+                            "line": {"type": "integer"},
+                            "severity": {"type": "string", "enum": SEVERITIES},
+                            "title": {"type": "string"},
+                            "detail": {"type": "string"},
+                            "suggestion": {"type": "string"},
+                            "confidence": {"type": "integer"},
+                            "reasoning": {"type": "string"},
+                            "fix_code": {"type": "string"},
+                            "references": {"type": "array", "items": {"type": "string"}},
                         },
+                        "required": [
+                            "category", "file", "line", "severity", "title", "detail",
+                            "suggestion", "confidence", "reasoning", "fix_code", "references",
+                        ],
+                        "additionalProperties": False,
                     },
                 },
-                "required": ["summary", "findings"],
-                "additionalProperties": False,
             },
+            "required": ["summary", "verdict", "risk_score", "risk_reason", "findings"],
+            "additionalProperties": False,
         },
-    ]
+    }
+    return READ_TOOLS + [submit_review]
 
 
 # ---------------------------------------------------------------------------
@@ -283,15 +374,15 @@ def execute_tool(name: str, tool_input: dict) -> str:
 # Agent döngüsü
 # ---------------------------------------------------------------------------
 
-def run_agent(diff: str, categories: list[str]) -> dict | None:
+def run_agent(diff: str, categories: list[str], persona: str) -> dict | None:
     """Model çağır -> tool çalıştır -> sonucu geri besle döngüsü.
 
-    submit_review çağrıldığında bulguları döner; model tool çağırmadan
+    submit_review çağrıldığında raporu döner; model tool çağırmadan
     biterse None döner (fallback üst katmanda ele alınır).
     """
     client = anthropic.Anthropic()
     tools = build_tools(categories)
-    system_prompt = build_system_prompt(categories)
+    system_prompt = build_system_prompt(categories, persona)
     messages: list[dict] = [
         {"role": "user", "content": f"Aşağıdaki pull request diff'ini incele.\n\n=== PR DIFF ===\n{diff}"}
     ]
@@ -358,19 +449,19 @@ def run_agent(diff: str, categories: list[str]) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Fail gate — hangi bulgular PR check'ini kırmızıya düşürür
+# Gate'ler — hangi durumlar PR check'ini kırmızıya düşürür
 # ---------------------------------------------------------------------------
 
 def failing_findings(findings: list[dict], fail_on: str) -> list[dict]:
     """FAIL_ON kurallarıyla eşleşen bulguları döner.
 
-    Kural formatı: "kategori:min_önem" (örn. "security:high", "any:medium").
+    Kural formatı: "kategori:min_önem" (örn. "security:high", "any:critical").
     Önem verilmezse "high" varsayılır.
     """
     matched: list[dict] = []
     for rule in (r.strip() for r in fail_on.split(",") if r.strip()):
         category, _, min_severity = rule.partition(":")
-        min_rank = SEVERITY_RANK.get(min_severity.strip() or "high", 2)
+        min_rank = SEVERITY_RANK.get(min_severity.strip() or "high", 3)
         for finding in findings:
             if category in ("any", finding["category"]) and SEVERITY_RANK[finding["severity"]] >= min_rank:
                 if finding not in matched:
@@ -387,16 +478,28 @@ def category_label(finding: dict) -> str:
     return f"{cat['emoji']} {cat['title']}"
 
 
+def render_inline_body(finding: dict) -> str:
+    parts = [
+        f"**{category_label(finding)} · {SEVERITY_BADGE[finding['severity']]} — {finding['title']}** "
+        f"`güven: %{finding['confidence']}`",
+        "",
+        finding["detail"],
+        "",
+        f"_{finding['reasoning']}_",
+    ]
+    if finding["suggestion"]:
+        parts += ["", f"**Öneri:** {finding['suggestion']}"]
+    if finding["fix_code"]:
+        parts += ["", "```suggestion", finding["fix_code"], "```"]
+    if finding["references"]:
+        parts += ["", "**Referanslar:** " + " · ".join(finding["references"])]
+    return "\n".join(parts)
+
+
 def post_inline_comment(repo: str, pr: str, head_sha: str, finding: dict) -> bool:
-    body = (
-        f"**{category_label(finding)} · {SEVERITY_BADGE[finding['severity']]} — {finding['title']}**"
-        f"\n\n{finding['detail']}"
-    )
-    if finding.get("suggestion"):
-        body += f"\n\n**Öneri:** {finding['suggestion']}"
     result = sh(
         "gh", "api", f"repos/{repo}/pulls/{pr}/comments",
-        "-f", f"body={body}",
+        "-f", f"body={render_inline_body(finding)}",
         "-f", f"commit_id={head_sha}",
         "-f", f"path={finding['file']}",
         "-F", f"line={finding['line']}",
@@ -410,21 +513,35 @@ def post_inline_comment(repo: str, pr: str, head_sha: str, finding: dict) -> boo
     return True
 
 
+def risk_bar(score: int) -> str:
+    filled = max(0, min(10, round(score / 10)))
+    return "█" * filled + "░" * (10 - filled)
+
+
 def post_summary(
     repo: str,
     pr: str,
     review: dict,
     categories: list[str],
     inline_failed: list[dict],
-    gate_hits: list[dict],
+    gate_reasons: list[str],
+    hidden_count: int,
 ) -> None:
     findings = review["findings"]
-    lines = ["## 🤖 AI Code Review", "", review["summary"], ""]
+    verdict = VERDICT_META.get(review["verdict"], review["verdict"])
+    lines = [
+        "## 🤖 AI Code Review",
+        "",
+        f"**Karar:** {verdict} · **Release Riski:** `{risk_bar(review['risk_score'])}` {review['risk_score']}/100",
+        f"> {review['risk_reason']}",
+        "",
+        review["summary"],
+        "",
+    ]
 
     if not findings:
         lines.append("✅ Kayda değer bir sorun bulunamadı.")
     else:
-        # Kategori bazlı gruplu rapor
         by_severity = sorted(findings, key=lambda f: -SEVERITY_RANK[f["severity"]])
         for category in categories:
             cat_findings = [f for f in by_severity if f["category"] == category]
@@ -435,20 +552,24 @@ def post_summary(
             lines.append("")
             for finding in cat_findings:
                 badge = SEVERITY_BADGE[finding["severity"]]
-                lines.append(f"- {badge} `{finding['file']}:{finding['line']}` — **{finding['title']}**")
+                lines.append(
+                    f"- {badge} `{finding['file']}:{finding['line']}` — "
+                    f"**{finding['title']}** _(güven %{finding['confidence']})_"
+                )
                 if finding in inline_failed:
                     # Satıra bağlanamayan bulgunun detayı burada verilir
                     lines.append(f"  - {finding['detail']}")
-                    if finding.get("suggestion"):
+                    if finding["suggestion"]:
                         lines.append(f"  - Öneri: {finding['suggestion']}")
             lines.append("")
 
-    if gate_hits:
-        lines += [
-            "---",
-            f"❌ **Fail gate:** `{os.environ.get('FAIL_ON', '')}` kuralıyla eşleşen "
-            f"{len(gate_hits)} bulgu var; bu check başarısız olarak işaretlendi.",
-        ]
+    if hidden_count:
+        lines.append(f"_ℹ️ Güven skoru MIN_CONFIDENCE altında kalan {hidden_count} bulgu gizlendi._")
+
+    if gate_reasons:
+        lines += ["---"] + [f"❌ {reason}" for reason in gate_reasons]
+
+    lines += ["", "_Sorusu olan `/ai <soru>` yazarak agent'la tartışabilir._"]
 
     sh("gh", "pr", "comment", pr, "--repo", repo, "--body", "\n".join(lines))
 
@@ -458,34 +579,54 @@ def main() -> None:
     pr = os.environ["PR_NUMBER"]
     head_sha = os.environ["HEAD_SHA"]
     fail_on = os.environ.get("FAIL_ON", "")
+    max_risk_raw = os.environ.get("MAX_RISK_SCORE", "").strip()
+    min_confidence = int(os.environ.get("MIN_CONFIDENCE", "0") or "0")
     categories = active_categories()
+    persona = active_persona()
 
     diff = get_diff()
     if not diff.strip():
         print("Diff boş, review atlanıyor.")
         return
 
-    print(f"Review kategorileri: {', '.join(categories)}")
-    review = run_agent(diff, categories)
+    print(f"Kategoriler: {', '.join(categories)} | Persona: {persona}")
+    review = run_agent(diff, categories, persona)
     if review is None:
         print("Agent submit_review çağırmadan bitti.", file=sys.stderr)
         sh("gh", "pr", "comment", pr, "--repo", repo,
            "--body", "## 🤖 AI Code Review\n\n⚠️ İnceleme tamamlanamadı, workflow loglarına bakın.")
         sys.exit(1)
 
+    all_findings = review["findings"]
+    visible = [f for f in all_findings if f["confidence"] >= min_confidence]
+    hidden_count = len(all_findings) - len(visible)
+    review["findings"] = visible
+
     inline_failed: list[dict] = []
-    for finding in review["findings"][:MAX_INLINE_COMMENTS]:
+    for finding in visible[:MAX_INLINE_COMMENTS]:
         if not post_inline_comment(repo, pr, head_sha, finding):
             inline_failed.append(finding)
-    inline_failed += review["findings"][MAX_INLINE_COMMENTS:]
+    inline_failed += visible[MAX_INLINE_COMMENTS:]
 
-    gate_hits = failing_findings(review["findings"], fail_on)
-    post_summary(repo, pr, review, categories, inline_failed, gate_hits)
-
-    print(f"Review tamamlandı: {len(review['findings'])} bulgu.")
+    # Gate'ler: bulgu bazlı (FAIL_ON) + risk skoru bazlı (MAX_RISK_SCORE)
+    gate_reasons: list[str] = []
+    gate_hits = failing_findings(visible, fail_on)
     if gate_hits:
-        for finding in gate_hits:
-            print(f"FAIL: [{finding['category']}/{finding['severity']}] {finding['title']}", file=sys.stderr)
+        gate_reasons.append(
+            f"**Fail gate:** `{fail_on}` kuralıyla eşleşen {len(gate_hits)} bulgu var."
+        )
+    if max_risk_raw and review["risk_score"] > int(max_risk_raw):
+        gate_reasons.append(
+            f"**Risk gate:** risk skoru {review['risk_score']} > izin verilen {max_risk_raw}."
+        )
+
+    post_summary(repo, pr, review, categories, inline_failed, gate_reasons, hidden_count)
+
+    print(f"Review tamamlandı: {len(visible)} bulgu ({hidden_count} gizli), "
+          f"verdict={review['verdict']}, risk={review['risk_score']}.")
+    if gate_reasons:
+        for reason in gate_reasons:
+            print(f"FAIL: {reason}", file=sys.stderr)
         sys.exit(1)
 
 

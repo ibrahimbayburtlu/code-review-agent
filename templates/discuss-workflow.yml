@@ -1,0 +1,61 @@
+# İnteraktif "/ai <soru>" özelliği — bu dosyayı projenin
+# .github/workflows/ai-discuss.yml yoluna kopyala.
+# ANTHROPIC_API_KEY secret'ı (review ile aynı) yeterli.
+
+name: AI Discuss
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  discuss:
+    if: ${{ github.event.issue.pull_request != null && startsWith(github.event.comment.body, '/ai') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve PR metadata
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh pr view "$PR_NUMBER" --repo "$REPO" \
+            --json headRefOid,baseRefOid \
+            --jq '"head=\(.headRefOid)\nbase=\(.baseRefOid)"' >> "$GITHUB_OUTPUT"
+
+      # Çağıran repo'yu PR'ın head commit'inde checkout et
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.pr.outputs.head }}
+
+      # Agent kodunu bu repo'dan al
+      - uses: actions/checkout@v4
+        with:
+          repository: ibrahimbayburtlu/code-review-agent
+          path: .review-agent
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r .review-agent/requirements.txt
+
+      - name: Answer question
+        working-directory: .review-agent/agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          BASE_SHA: ${{ steps.pr.outputs.base }}
+          HEAD_SHA: ${{ steps.pr.outputs.head }}
+          QUESTION: ${{ github.event.comment.body }}
+        # Çağıran repo'nun kodu bir üst dizinde; agent oradan git diff alır
+        run: cd "$GITHUB_WORKSPACE" && python .review-agent/agent/discuss_agent.py

@@ -14,30 +14,12 @@ concurrency:
 
 jobs:
   review:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run review agent
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          # Çalışacak review türleri (security, bug, performance, architecture, test)
-          REVIEW_CATEGORIES: "security,bug,performance,architecture,test"
-          # PR check'ini kırmızıya düşürecek bulgular. Örn: "security:high" veya
-          # "security:medium,bug:high" veya "any:high". Boş = hiç fail etme.
-          FAIL_ON: ""
-        run: python agent/review_agent.py
+    uses: ./.github/workflows/reusable-review.yml
+    with:
+      categories: "security,bug,performance,architecture,test"
+      persona: "default"
+      fail_on: ""
+      max_risk_score: ""
+      min_confidence: "0"
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

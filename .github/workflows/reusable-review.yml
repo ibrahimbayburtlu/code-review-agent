@@ -1,0 +1,78 @@
+name: Reusable AI Code Review
+
+# Başka repo'lardan şöyle çağrılır:
+#
+#   jobs:
+#     review:
+#       uses: ibrahimbayburtlu/code-review-agent/.github/workflows/reusable-review.yml@main
+#       secrets:
+#         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+#
+# Hazır şablon: templates/caller-workflow.yml
+
+on:
+  workflow_call:
+    inputs:
+      categories:
+        description: "Virgülle ayrılmış review kategorileri"
+        type: string
+        default: "security,bug,performance,architecture,test"
+      persona:
+        description: "Reviewer üslubu: default | strict | mentor | clean-code | paranoid"
+        type: string
+        default: "default"
+      fail_on:
+        description: "Fail gate kuralları, örn. 'security:high' (boş = fail etme)"
+        type: string
+        default: ""
+      max_risk_score:
+        description: "Risk skoru bunu aşarsa check fail (boş = kapalı)"
+        type: string
+        default: ""
+      min_confidence:
+        description: "Bu güven skorunun altındaki bulgular gizlenir (0-100)"
+        type: string
+        default: "0"
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # PR'ın açıldığı (çağıran) repo'yu checkout eder
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Agent kodunu bu repo'dan alır — çağıran repo'da agent kopyası gerekmez
+      - uses: actions/checkout@v4
+        with:
+          repository: ibrahimbayburtlu/code-review-agent
+          path: .review-agent
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r .review-agent/requirements.txt
+
+      - name: Run review agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEW_CATEGORIES: ${{ inputs.categories }}
+          REVIEW_PERSONA: ${{ inputs.persona }}
+          FAIL_ON: ${{ inputs.fail_on }}
+          MAX_RISK_SCORE: ${{ inputs.max_risk_score }}
+          MIN_CONFIDENCE: ${{ inputs.min_confidence }}
+        run: python .review-agent/agent/review_agent.py
